@@ -440,3 +440,247 @@ sudo nginx -t && sudo systemctl reload nginx
 - **服务端组件 vs `"use client"`**：都预渲染成 HTML，后者额外多送一份 JS 好让它"活"（4.5）；
 - **state 放哪**：组件内存（4.3/4.4）→ URL（4.4）→ 后端数据库（模块 5）；
 - **翻译官**：Vite 翻译 JSX/模块 → Next 接管构建并预渲染——工具在换，"源代码 ≠ 运行的代码"这条主线从 4.2 贯到 4.6。
+
+## 模块 5.1：究竟什么是 API
+
+**一句话**：API = 程序对外公开的固定入口——按它规定的方式发请求，就能用上它的能力，无需知道内部实现。前端跑在用户浏览器里管展示；后端常驻服务器管计算与数据；两者靠 API 对话，格式通常是 JSON。
+
+两个直观例子（GET 取数据 / POST 提交内容）：
+
+```bash
+curl 'https://api.ipify.org?format=json'          # GET：返回 {"ip":"114.86.123.45"}
+curl https://api.deepseek.com/chat/completions \  # POST：提交对话，拿回 AI 回复
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
+  -d '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"你好"}]}'
+```
+
+格式标准的意义：**调用方与提供方语言无关**。AI 产品的本质就是调大模型 API，Agent 的联网工具也都在调 API。后端语言选什么都行，课程用 Python（概念与语言无关）。
+
+## 模块 5.2：Python 环境与 venv
+
+- **多版本共存**：`python`/`python3` 是历史遗留（2→3 不兼容），`which python3` 查明实际用的是哪个；
+- **venv 虚拟环境**：每个项目一套专属 Python + 第三方包，互不冲突。`.venv` 要**激活**才生效（Linux `source .venv/bin/activate`；Windows `.venv\Scripts\activate`；退出 `deactivate`）；conda 是全局式管理，课程推荐 venv；
+- **两对对应关系**：pip ≈ 前端的 npm；requirements.txt ≈ package.json（要进 Git）。`.venv/` 不进 Git；
+- **Python 语法**：缩进即语法；字典 ≈ JSON（单引号 vs 双引号）。
+
+```bash
+mkdir backend && cd backend
+python3 -m venv --prompt=zero-to-tech .venv
+source .venv/bin/activate
+pip install requests                 # 用 Python 调 API 的第三方库
+pip freeze > requirements.txt        # 固化依赖清单
+```
+
+## 模块 5.3：看懂 HTTP，手搓 API
+
+**一句话**：HTTP 报文全是纯文本，请求与响应结构对称，唯一差别在第一行（请求行 vs 状态行）。手搓一个接口就要自己做路由、状态行、响应头、空行、序列化——这些属于 HTTP 规范的杂活，正是框架（5.4）替你打包的东西。
+
+### HTTP 请求 = 请求行 + 请求头 + 空行 + 请求体
+
+**请求行**（第一行，三件事）：`方法 路径 协议版本`，如 `GET /api/profile?format=json HTTP/1.1`。路径是 URL 去掉协议和域名后的部分，`?` 后面是查询参数。
+
+**请求头**（一行一条 `名字: 值`）：
+
+| 头 | 含义 |
+| --- | --- |
+| Host | 要找哪台服务器 |
+| User-Agent | 我是谁（什么工具/浏览器） |
+| Accept | 能接受什么格式的回应 |
+| Content-Type | 提交的请求体是什么格式 |
+| Content-Length | 请求体有多长 |
+| Authorization | 身份凭证（如 `Bearer sk-…`） |
+| Cookie | 随身带的"小纸条" |
+
+**空行**：分界线——"头说完了，下面是体"。**漏了它调用方直接报错**。
+**请求体**：真正提交的内容；GET 一般没有体。
+
+### HTTP 响应 = 状态行 + 响应头 + 空行 + 响应体
+
+**状态行**：`协议版本 状态码 说明`，如 `HTTP/1.1 200 OK`。状态码家族规律：**2xx 成功、4xx 请求方的锅、5xx 服务器的锅**（200 成功 / 404 没找到 / 422 字段校验不过，见 5.4）。
+
+**响应头**：
+
+| 头 | 含义 |
+| --- | --- |
+| Content-Type | 回的体是什么格式（**本节主角**） |
+| Content-Length | 体有多长 |
+| Server / Date | 服务器软件 / 处理时间 |
+| Cache-Control | 可缓存、能存多久（呼应 4.2 的 hash 文件名） |
+| Set-Cookie | 发"小纸条" |
+| Location | 内容搬家了（配合 3xx 跳转） |
+| Access-Control-Allow-Origin | 允许哪些来源调用（5.5 CORS 的主角） |
+
+**响应体**：正文——API 的 JSON 就放这里。
+
+### 请求方法：描述意图，不是数据方向
+
+| 方法 | 意图 |
+| --- | --- |
+| GET | 把某样东西给我（通常不带体） |
+| POST | 我提交一段内容请你处理（内容放体里） |
+| PUT / PATCH / DELETE | 整个换掉 / 改一部分 / 删掉 |
+| HEAD / OPTIONS | 只要头不要体（探路）/ 询问能做什么 |
+
+curl 默认发 GET，带 `-d` 自动改发 POST。响应永远都有——GET/POST 是 HTTP 的方法，不是 API 的发明。
+
+### Content-Type：头一变，处理方式就变
+
+内容不变，`Content-Type` 一变对方处理方式就变：`text/html` 渲染成网页、`text/plain` 原样显示、`application/json` 按 JSON 解析。浏览器眼里"网页"和"API 数据"只是 Content-Type 不同。
+
+### 手搓代码（http.server）
+
+```python
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+
+profile = {"heroTitle": "关于我", "heroSubtitle": "项目，创意，灵感，心得，我的作品"}
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/api/profile":                       # 路由判断 = if/elif 判 self.path
+            self.send_response(200)                           # → 状态行
+            self.send_header("Content-Type", "application/json")  # → 响应头
+            self.end_headers()                                # → 空行（硬要求，漏了全盘皆乱）
+            body = json.dumps(profile, ensure_ascii=False)    # ensure_ascii=False：中文原样输出
+            self.wfile.write(body.encode("utf-8"))            # → 响应体（网络传字节，要 encode）
+        else:
+            self.send_response(404)                           # else 兜底
+            self.end_headers()
+
+print("后端已启动：http://localhost:8000/api/profile")
+HTTPServer(("", 8000), Handler).serve_forever()   # 守在 8000 端口永远等请求
+```
+
+代码与规范一一对应：`do_GET`→方法、`self.path`→路径、`send_response`→状态行、`send_header`→响应头、`end_headers`→空行、`wfile.write`→响应体、else→404。课堂实验：加 `/hello` 分支返回 HTML（Content-Type 改 `text/html; charset=utf-8`，改成 `text/plain` 再看效果）；`do_GET` 开头 `print(self.headers)` 与 `print(self.client_address)`——服务端天然看得见 UA、IP、语言偏好（访问统计与防刷的地基）。
+
+### 测试工具：curl -v 与 F12 是同一份报文的两个视角
+
+```bash
+curl -v 'https://api.ipify.org?format=json'   # > 请求、< 响应、* 旁白
+python3 main.py                               # 终端 1：起服务（Ctrl+C 停）
+curl -v http://localhost:8000/api/profile     # 终端 2：调自己的服务
+```
+
+Chrome F12 → Network 面板看到的与 `curl -v` 是同一份报文。
+
+### 伏笔
+
+手搓一个接口就要写全套杂活，几十个接口"是要出人命的"。一模一样的事就有人打包复用——**框架**。下一节 FastAPI 登场。
+
+## 模块 5.4：FastAPI 登场
+
+**一句话**：Python 最年轻的后端框架，专为写 API 而生——5.3 手搓的杂活（路由判断、状态码、响应头、JSON 序列化、404 兜底、请求体解析校验）全部打包，我们只填"这个路径返回什么数据"。官方文档：<https://fastapi.tiangolo.com/zh/>
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+@app.get("/api/profile")
+def get_profile():
+    return profile
+
+class AnalyzeRequest(BaseModel):
+    text: str                      # 字段声明一次：解析、校验、转对象全自动
+
+@app.post("/api/analyze")
+def analyze(req: AnalyzeRequest):
+    return {"text": req.text, "score": 0.5, "label": "偏平静", "pinyin": "（模块 6 再说）"}
+```
+
+**手搓 vs 框架的分工对照**：
+
+| 手搓版（5.3） | FastAPI |
+| --- | --- |
+| if/elif 判 `self.path` | `@app.get(...)` 一行装饰器 |
+| `send_response(200)` + `send_header(...)` | 自动（状态行 + JSON 响应头） |
+| `json.dumps(...).encode(...)` | 返回字典自动序列化 |
+| else 兜底 404 | 自动（未定义路径回 `{"detail":"Not Found"}`） |
+| 手读 Content-Length、收字节、解析、校验（POST） | `req: AnalyzeRequest` 声明后全自动；字段缺失/类型不对回 **422** |
+
+分工边界：FastAPI 负责定义接口，**uvicorn 负责运行服务器**（`HTTPServer(...).serve_forever()` 的角色）。
+
+**运行与测试**（安装：`pip install "fastapi[standard]"`）：
+
+```bash
+uvicorn main:app --reload    # main:app = 文件:变量；--reload 改代码自动重启
+fastapi dev                  # 快捷方式，默认找 main.py（上线用 fastapi run）
+curl http://localhost:8000/api/profile
+curl http://localhost:8000/api/analyze -H "Content-Type: application/json" \
+  -d '{"text": "今天的风很轻"}'
+```
+
+**自动文档**：`http://localhost:8000/docs`（Swagger UI，可 Try it out 直接调；另有 /redoc）——类型声明一次，文档、编辑器补全、数据校验、422 报错全部白拿。
+
+**深入掌握 FastAPI**：独立的 10 课学习课程见 [`fastapi-learn/`](./fastapi-learn)——每课一个可运行 `main.py` + 验收标准 + 中文教学注释，覆盖路由、参数与校验、响应控制、依赖注入、异常与 CORS、OAuth2+JWT 认证、异步与 CRUD、项目拆分（APIRouter/配置/lifespan）、测试（TestClient/pytest），全部经行为级测试验证（35/35 通过）。
+
+**伏笔**：score/label/pinyin 还是写死的占位值——模块 6 换成真的（内部实现换掉，接口不变）；5.5 前后端正式握手（CORS）。
+
+## 模块 5.5：前后端联调与 CORS
+
+**一句话**：前后端各自能跑 ≠ 能联调——前端(3000/5173)调后端(8000)是**跨源**，浏览器会拦。关键认知：**CORS 只约束浏览器**，curl 永远不受限。排查三板斧：① Network 面板（请求发出去了吗？有没有失败的 OPTIONS？）→ ② 后端终端（收到请求、返回 200 了吗？）→ ③ Console（是不是 CORS 报错？）。
+
+### 源与同源策略
+
+源 = **协议 + 域名 + 端口**，任一不同即不同源——3000 和 8000 端口不同，就是跨源。最重要的认知修正：简单 GET 请求**其实已经到达后端并返回了 200**，被浏览器拦下的是"网页脚本**读取**这份未经许可的跨源响应"，不是请求本身。
+
+机制：跨源请求自动带 `Origin: http://localhost:3000` 请求头；后端若允许，响应头返回 `Access-Control-Allow-Origin: http://localhost:3000`——两边对得上，浏览器才把响应交给 JS。
+
+### 预检请求（OPTIONS）：先问后发
+
+带 `Content-Type: application/json` 的 POST **不是简单请求**：浏览器先自动发 `OPTIONS /api/analyze` 询问来源/方法/头是否允许，预检通过才发真正的 POST——预检不过，POST 根本不离开浏览器。目的：防止可能产生副作用的请求在未授权时就已在后端生效。curl 不是浏览器，看不到预检也不会被拦。
+
+### 后端放行（FastAPI 两步）
+
+```python
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],   # 第一步：声明允许的来源 → GET 通了
+    allow_methods=["GET", "POST"],             # 第二步：POST 报 "Failed to fetch"、
+)                                              # Network 里看到失败的 OPTIONS → 补方法
+```
+
+预检由 CORSMiddleware 自动应答——**不需要为 OPTIONS 写任何路由**。`Content-Type` 属默认放行的常见头，不必写 `allow_headers`；将来带 token 之类自定义头才需要列出。（fastapi-learn 第 6 课的 CORS 段就是这套配置。）
+
+### 前端配置化：把写死的后端地址收进环境变量
+
+Next.js 用 `.env.local`（本课是 Next 而非 Vite，没有 `import.meta.env`）：
+
+```bash
+# .env.local（不进 Git）
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+```
+
+```js
+const API = process.env.NEXT_PUBLIC_API_BASE_URL;
+fetch(`${API}/api/analyze`, { method: "POST", ... })
+```
+
+`NEXT_PUBLIC_` 前缀 = 值可进浏览器代码 → **只能放公开配置**（如后端地址），绝不能放密钥密码。修改环境变量后必须重启开发服务器。
+
+### 联调完整链路（验收清单）
+
+两个终端分别起后端（`fastapi dev`，8000）和前端（`npm run dev`，3000）→ 后端 `/api/profile` 数据结构对齐前端 site.js → curl 确认接口正常 → 前端组件接 fetch → 遇 CORS 逐个放行 → GET/POST 全通。最终链路：
+
+```text
+输入文字 → 浏览器 POST → OPTIONS 预检通过 → FastAPI 校验请求体
+→ Python 计算 → JSON 响应 → 前端更新界面 → 结果区自动刷新
+```
+
+### 伏笔
+
+两笔欠账：`/api/analyze` 的拼音/情感分数还是占位假数据；分析结果用完即丢无历史。模块 6.1 用 Python 第三方库把分析变成真的，并把结果保存下来。
+
+## 附：Git 撤销提交速查
+
+| 命令 | 提交 | 改动去哪了 | 适用 |
+| --- | --- | --- | --- |
+| `git reset --soft HEAD~1` | 撤销 | 回到**暂存区** | 提交信息写错 / 想补文件再提交 |
+| `git reset HEAD~1` | 撤销 | 留在**工作区**（未暂存） | 想重新挑选要提交的内容 |
+| `git reset --hard HEAD~1` | 撤销 | **直接丢弃** | 彻底不要这次改动（慎用，找不回） |
+
+`HEAD~1` = 上一次提交，`HEAD~2` = 上上次。已 push 到远程时：协作场景用 `git revert HEAD`（生成反向新提交，不动历史，最安全）；个人仓库才考虑 `reset --hard` 后 `git push --force`。

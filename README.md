@@ -6,6 +6,8 @@
 
 命令与概念速查（学习笔记，按模块追加）：[`NOTES.md`](./NOTES.md)。
 
+FastAPI 独立学习课程（10 课递进，可运行、带中文教学注释）：[`fastapi-learn/`](./fastapi-learn)。
+
 ## 当前可用
 
 - [`zero-to-tech-4-1/`](./zero-to-tech-4-1) —— **模块 4.1：现代前端第一步——模块化**

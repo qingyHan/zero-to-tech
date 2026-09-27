@@ -1,0 +1,5 @@
+# 虚拟环境与 Python 缓存，均可重建，不提交
+.venv/
+__pycache__/
+*.py[cod]
+.mimosa
