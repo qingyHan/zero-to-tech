@@ -675,6 +675,219 @@ fetch(`${API}/api/analyze`, { method: "POST", ... })
 
 两笔欠账：`/api/analyze` 的拼音/情感分数还是占位假数据；分析结果用完即丢无历史。模块 6.1 用 Python 第三方库把分析变成真的，并把结果保存下来。
 
+## 模块 6.1：第三方库和 PyPI
+
+**一句话**：别造轮子——面对需求先问"社区里是不是早有人写好了"。PyPI（pypi.org）≈ Python 的 npm registry；找库三条路（官网搜、搜索引擎、问 AI），但 AI 会幻觉出不存在的包名甚至撞上抢注恶意包，**验库两层**：①靠谱吗（GitHub 星数 + 最近更新）；②合用吗（读 README 对照需求）。
+
+本节选定两个库（代码一行没动，只改 requirements.txt）：
+
+```python
+from pypinyin import lazy_pinyin, Style
+lazy_pinyin("重庆", style=Style.TONE)      # ['chóng', 'qìng']——多音字判对
+from snownlp import SnowNLP
+SnowNLP("太失望了，再也不来了").sentiments  # 0.0027（0~1，越接近 1 越积极）
+```
+
+**REPL**：敲一行出一行（表达式自动回显），适合试库试错；.py 脚本整文件跑完只显示 print。套路：找库 → 验库 → REPL 玩两下 → 接进项目。
+
+## 模块 6.2：让网页真的会分析文字——换芯不换壳
+
+**一句话**：只改 `analyze` 函数内部实现，API 的路径/方法/请求体/返回字段全不变——**前端一行不改，假数据变真**。这是"接口约定"的价值：守住约定，内部随便换。
+
+```python
+def score_label(score):
+    if score >= 0.6:   return "偏积极"
+    elif score <= 0.4: return "偏消极"
+    else:              return "中性"      # 阈值 0.6/0.4 是实测后拍板的产品决定
+
+@app.post("/api/analyze")
+def analyze(req: AnalyzeRequest):
+    text = req.text
+    score = round(SnowNLP(text).sentiments, 2)
+    return {
+        "text": text,
+        "score": score,
+        "label": score_label(score),
+        "pinyin": " ".join(lazy_pinyin(text, style=Style.TONE)),
+    }
+```
+
+**模型边界**（重要认知）：snownlp 用商品评论语料训练——"今天下午三点开会"被判偏消极、"呵呵，真是太棒了呢"（阴阳怪气）被判偏积极。**模型没有常识，只有训练时见过的世界**。选型谱系：本地小模型（免费/快/隐私好/边界明显）→ 本地部署开源大模型（数据不出门/要硬件）→ 云端 API（准/收费/数据出第三方），按预算、隐私、精度选。
+
+## 模块 6.3：数据库前传——文件方案与它的天花板
+
+**一句话**：持久化 = 让数据活得比进程久。四种存储没有绝对好坏：内存（快但断电即失）、文件（最直接）、数据库（存好取快）、云/对象存储（大文件）。**存取一体两面：怎么存决定好不好取。**
+
+记录五字段：`text / score / label / pinyin / created_at`。格式选 JSON（纯文本按行写会被原文逗号搞乱字段）；时间坑：`datetime.now()` 是无时区本地时间，**规矩是存 UTC、展示时转本地**：`datetime.now(timezone.utc).isoformat(timespec="seconds")`。API 约定演化规则：**加字段是安全演化，改名/删除才是破坏**。
+
+文件版实现（新面孔：`with open` 自动关文件、`try/except FileNotFoundError`）：
+
+```python
+HISTORY_FILE = "history.json"
+
+def load_history():
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return []
+
+def save_record(record):
+    records = load_history()
+    records.append(record)
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+@app.get("/api/history")
+def history():
+    records = load_history()
+    records.reverse()      # 新的排前面
+    return records[:10]    # 只留最近 10 条
+```
+
+**文件方案的四处痛**（不是代码烂，是文件存储的天花板）：① 取 10 条也要全量读入；② 存一条要重写整份；③ 并发脏写/脏读；④ 写一半崩溃整份损坏。专治它们的机制叫**事务**，由数据库提供——这正是 6.4 的动机。
+
+## 模块 6.4：数据库正传——SQLite 与 SQL（重点）
+
+**选型推理**：两个分类维度交叉——关系型 vs 非关系型（按数据形态）、嵌入式 vs 服务式（是否常驻监听端口）。结构化数据 + 小项目不想养常驻服务 → **SQLite**：零安装（Python 标准库自带 `import sqlite3`）、单文件、普及到"手机里此刻就躺着几十个 SQLite 文件"；将来迁 MySQL/PostgreSQL 方便，因为都用 SQL。类型系统极简：INTEGER / REAL / TEXT / BLOB，日期存 ISO 字符串，布尔用 0/1。
+
+### SQL 最小集（原样）
+
+```sql
+CREATE TABLE IF NOT EXISTS films (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT, language TEXT, release_date TEXT, created_at TEXT
+);
+INSERT INTO films (title, language, release_date, created_at)
+    VALUES ('肖申克的救赎', '英语', '1994-09-23', datetime('now'));   -- datetime('now') 是函数调用，默认 UTC
+SELECT * FROM films WHERE language = '日语';
+SELECT id, title, created_at FROM films ORDER BY created_at DESC LIMIT 5;   -- 新的在前，只取 5 条
+DELETE FROM films WHERE 条件表达式;   -- WHERE 千万别漏，不带条件清空整表
+-- 另识：UPDATE（改值）、DROP TABLE（连结构删，"删库跑路"）
+```
+
+### 事务与 SQL 注入
+
+- **事务**：`cur.execute()` 后必须 `conn.commit()` 才算落盘；没 commit 就退出，改动不算数；
+- **SQL 注入**：值靠单引号分界，用户输入含引号会被当命令解析。经典注入 `' OR '1'='1` 拼进 WHERE 变永真、泄露全表。铁律：**SQL 里永远不拼用户输入，值永远走 `?` 占位符**——数据库把该位置铁定当纯数据：
+
+```python
+cur.execute(
+    "INSERT INTO films (title, language, release_date, created_at) "
+    "VALUES (?, ?, ?, datetime('now'))",
+    [title, language, release_date],
+)
+```
+
+### 数据库为什么 ORDER BY DESC LIMIT 10 不爆内存
+
+三招：① LIMIT 10 只攥住 10 条（每来一条与最旧的比）；② 不写 LIMIT 时按页读盘分批排；③ **索引**——像字典检字表，提前维护排好序的目录（底层 B 树，插入只动局部）。索引代价：额外存储、稍慢写入；原则：只给经常排序/筛选的列建。
+
+## 模块 6.5：重构——在项目中使用 SQLite
+
+**一句话**：先"搬家"再"装修"——重构 = **不改变外部可观察行为**的前提下调整内部结构（自带验证尺子）；换实现（文件→SQLite）不算重构，混做会废掉尺子。**分层**：接口层管收发 HTTP、业务层管"怎么做"、存储层管"存哪儿怎么取"——分的是职责，不是文件。
+
+**搬家**：存储代码抽到 `storage.py`（用职责命名，名字里不带 file/SQL 等实现字眼；写死的 limit=10 改成参数 `get_history(limit)`——动作归存储层，决定归调用方）。**装修**：storage.py 整体换成 SQLite 版，接口层一行不改：
+
+```python
+# storage.py（SQLite 版）
+DB_FILE = "history.db"
+
+def get_conn():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row      # 查询结果带列名，dict(row) 直接转 JSON 形状
+    return conn
+
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT, score REAL, label TEXT, pinyin TEXT, created_at TEXT)""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at)")
+    conn.commit()
+    conn.close()
+
+def save_record(record):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO history (text, score, label, pinyin, created_at) VALUES (?, ?, ?, ?, ?)",
+                [record["text"], record["score"], record["label"], record["pinyin"], record["created_at"]])
+    conn.commit()
+    conn.close()
+
+def get_history(limit):
+    conn = get_conn()
+    rows = conn.cursor().execute(
+        "SELECT * FROM history ORDER BY created_at DESC LIMIT ?", [limit]).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+# main.py 里两行：from storage import init_db, save_record, get_history   +   init_db()
+# .gitignore 加：backend/*.db
+```
+
+文件版三行 Python（load → reverse → 切片）换成一句 SQL——数据库版的姿态是"**只说要什么**"（声明式），而非"怎么做"。验证工具：DB Browser for SQLite / DBeaver 打开 history.db 看 Browse Data。"换芯不换壳"在接口、函数、文件三个尺度各成立一次——边界立得住，边界后可整体换掉（模块 7 连 SQLite 本身都会被换）。
+
+## 模块 6.6：状态与会话
+
+**一句话**：历史已入库但全站混用——"我打的字所有陌生人看得见"。根因：**HTTP 无状态**（每个请求处理完服务器全忘，这是刻意选择：海量短请求要求无状态，换来可扩展与负载均衡；对比 ssh 是有状态的长连接）。解法：承认底层无状态，**用尽可能小的代价把状态重新"长"出来**——让服务器认出"同一个人"，数据本身留在库里。
+
+### 会话与 Cookie 的机制
+
+**会话（session）** = 把一串互不相干的请求认定为"同一个来访者的一次连续交互"——应用层构造的概念，不是 HTTP 自带。标识三条件：唯一、每次请求都带、**不能被猜出**。URL 参数会暴露、认 IP 不可靠、前端手动加 header 易漏 → 交给浏览器：**cookie 自动带上**。
+
+比喻：包裹 = 状态数据；柜台给的纸条 = cookie；纸条上的编号 = session_id；**会话是"和柜台之间这档子事"**——cookie 是实打实的机制，session 是认定出的关系，不在一个层面，谈不上二选一（App 不用 cookie，用 token 放请求头）。
+
+### 代码改动四步（原样）
+
+```python
+# 第〇步：跨源带 cookie——后端 CORS 点头 + 前端 credentials 点头，缺一不可
+app.add_middleware(CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["GET", "POST"],
+    allow_credentials=True)            # ← 新增：允许跨源请求带 cookie
+# 注意：带凭证时不能用 allow_origins=["*"]，必须点名具体源
+
+// 前端两处 fetch 加：
+credentials: "include"                 // ← 允许浏览器带 cookie（开关，不是手动塞内容）
+
+# 第一步：history 表加 session_id 列；索引改为 (session_id, created_at)
+# ——"索引是为查询而建的，查询变了索引就得跟着变"（先筛列后排列）
+
+# 第二步：发纸条/认纸条（main.py）
+def get_session_id(request: Request, response: Response) -> str:
+    sid = request.cookies.get("session_id")     # 先看有没有纸条
+    if not sid:                                  # 第一次来：发一张
+        sid = uuid.uuid4().hex                   # 随机、不重复
+        response.set_cookie("session_id", sid,
+            httponly=True, samesite="lax", max_age=60*60*24*30)   # 记 30 天
+    return sid
+
+# 第三步：存查都认 session_id（storage.py）
+def save_record(session_id, record): ...   # INSERT 带上 session_id 列
+def get_history(session_id, limit):
+    "SELECT * FROM history WHERE session_id = ? ORDER BY created_at DESC LIMIT ?"
+
+# 第四步：接口先认人再干活
+@app.post("/api/analyze")
+def analyze(req: AnalyzeRequest, request: Request, response: Response):
+    sid = get_session_id(request, response)
+    ...
+    save_record(sid, result)     # 存的时候盖记号；返回体一个字没变——session_id 只走 cookie
+```
+
+### Cookie 要点
+
+- **Set-Cookie**（响应头，发纸条，带属性）vs **Cookie**（请求头，只带回 `名=值`，规范不允许带属性）；
+- 属性：`Max-Age=2592000`（30 天，不写则浏览器一关就扔）、`HttpOnly`（JS 读不到）、`SameSite=lax`、`Path=/`（默认，所有路径都带）；
+- curl 不存 cookie——连发两次 session_id 都不同（正好验证"发纸条"逻辑）；
+- **边界**：会话 ≠ 认证。换电脑/清 cookie 纸条就没了，数据还在库里但取不出来；登录认证是这层之上的另一课。
+
+### 模块 6 收官与大模型伏笔
+
+项目最终形态：静态前端 + FastAPI 后端 + SQLite。彩蛋对比：DeepSeek"记住你"的真相是把整个 messages 数组每轮重发（**每一次请求都是世界的第一天**）——Web 会话状态存服务器只带 32 字符 id，而裸调大模型 API 客户端每次带全部历史（Claude Code 这类 Agent"记得你"就是这么实现的，长对话更贵因为按整段历史计 token）。下一模块部署上线：前端 build、后端 systemd 常驻、Nginx 反代 /api/ 实现同源（届时 credentials 那两行可以删掉）。
+
 ## 附：Git 撤销提交速查
 
 | 命令 | 提交 | 改动去哪了 | 适用 |
